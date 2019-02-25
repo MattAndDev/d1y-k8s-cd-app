@@ -1,0 +1,62 @@
+variables:
+  DEPLOYMENT_IMAGE: mattanddev/d1y-k8s-cd:$CI_PIPELINE_ID
+  K8S_CLUSTER: do-fra1-burn-after-reading
+  K8S_USER: d1y-ci
+  K8S_SERVER: https://251dd017-6ba4-4111-8256-e4687f5ac584.k8s.ondigitalocean.com
+
+stages:
+  - pack
+  - deploy
+
+crate-docker-image:
+  image: docker:latest
+  services:
+    - docker:dind
+  stage: pack
+  before_script:
+    # login to docker hub
+    - docker login -u $DOCKERHUB_USER -p "$DOCKERHUB_PASSWORD" $DOCKERHUB_REGISTRY 
+  script:
+    - docker build -t $DEPLOYMENT_IMAGE . --build-arg CI_COMMIT_SHA=$CI_COMMIT_SHA
+    - docker push $DEPLOYMENT_IMAGE
+    - docker rmi $DEPLOYMENT_IMAGE
+  tags:
+    - docker
+
+deploy-to-k8s:
+  image: alpine
+  stage: deploy
+  script:
+    # install curl and then kubectl
+    - apk add --no-cache curl
+    - curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl
+    # allow execution
+    - chmod +x ./kubectl
+    # expose the kubectl command
+    - mv ./kubectl /usr/local/bin/kubectl
+    # generate kubeconfig
+    - |
+      cat >.kubeconfig <<EOL
+      apiVersion: v1
+      kind: Config
+      clusters:
+      - name: $K8S_CLUSTER
+        cluster:
+          certificate-authority-data: $K8S_CERTIFICATE
+          server: $K8S_SERVER
+      contexts:
+      - name: $K8S_CLUSTER
+        context:
+          cluster: $K8S_CLUSTER
+          user: $K8S_USER
+      current-context: $K8S_CLUSTER
+      users:
+      - name: $K8S_USER
+        namespace: dy1
+        user:
+          token: $K8S_TOKEN
+      EOL
+    # replace in pace value for gitlab ci image
+    - sed  -ie "s/\$IMAGE_VERSION/$CI_PIPELINE_ID/g" k8s/deployment.yml
+    # apply k8s templatess
+    - kubectl --kubeconfig=.kubeconfig apply -f k8s
